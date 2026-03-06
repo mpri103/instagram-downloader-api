@@ -1,79 +1,77 @@
 import axios from "axios"
 
-export default async function handler(req, res) {
+export default async function handler(req, res){
 
   const url = req.query.url
 
-  if (!url) {
-    return res.status(400).json({
+  if(!url){
+    return res.json({
       status:false,
-      message:"Missing Instagram URL"
+      message:"Missing URL"
     })
   }
 
-  try {
+  try{
 
-    const response = await axios.get(url,{
+    // shortcode extract
+    const match = url.match(/(reel|p)\/([^/?]+)/)
+
+    if(!match){
+      return res.json({
+        status:false,
+        message:"Invalid Instagram URL"
+      })
+    }
+
+    const shortcode = match[2]
+
+    const apiUrl =
+      `https://www.instagram.com/api/v1/media/${shortcode}/info/`
+
+    const response = await axios.get(apiUrl,{
       headers:{
-        "User-Agent":"Mozilla/5.0"
+        "User-Agent":"Mozilla/5.0",
+        "X-IG-App-ID":"936619743392459"
       }
     })
 
-    const html = response.data
-
-    const jsonMatch = html.match(/window\._sharedData = (.*?);<\/script>/)
-
-    if(!jsonMatch){
-      return res.json({
-        status:false,
-        message:"Media not found"
-      })
-    }
-
-    const data = JSON.parse(jsonMatch[1])
-
-    const mediaData =
-      data.entry_data.PostPage[0].graphql.shortcode_media
+    const data = response.data.items[0]
 
     let media=[]
 
-    // VIDEO (reels)
-    if(mediaData.video_url){
+    // video
+    if(data.video_versions){
       media.push({
         type:"video",
-        url:mediaData.video_url
+        url:data.video_versions[0].url
       })
     }
 
-    // IMAGE
-    if(mediaData.display_url){
+    // image
+    if(data.image_versions2){
       media.push({
         type:"image",
-        url:mediaData.display_url
+        url:data.image_versions2.candidates[0].url
       })
     }
 
-    // CAROUSEL
-    if(mediaData.edge_sidecar_to_children){
+    // carousel
+    if(data.carousel_media){
 
-      mediaData.edge_sidecar_to_children.edges.forEach(item=>{
+      data.carousel_media.forEach(item=>{
 
-        const node = item.node
-
-        if(node.is_video){
-
+        if(item.video_versions){
           media.push({
             type:"video",
-            url:node.video_url
+            url:item.video_versions[0].url
           })
+        }
 
-        }else{
-
+        if(item.image_versions2){
           media.push({
             type:"image",
-            url:node.display_url
+            url:item.image_versions2.candidates[0].url
           })
-
         }
 
       })
@@ -85,7 +83,7 @@ export default async function handler(req, res) {
       media:media
     })
 
-  } catch(err){
+  }catch(e){
 
     return res.json({
       status:false,
