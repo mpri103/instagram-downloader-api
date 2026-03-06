@@ -23,11 +23,11 @@ module.exports = async function (req, res) {
 
     let media=[]
 
-    // find videos
-    const videoMatches =
+    // find video urls
+    const videos =
       [...html.matchAll(/"video_url":"([^"]+)"/g)]
 
-    videoMatches.forEach(v=>{
+    videos.forEach(v=>{
       media.push({
         type:"video",
         url:v[1].replace(/\\u0026/g,"&")
@@ -35,10 +35,10 @@ module.exports = async function (req, res) {
     })
 
     // find images
-    const imageMatches =
+    const images =
       [...html.matchAll(/"display_url":"([^"]+)"/g)]
 
-    imageMatches.forEach(i=>{
+    images.forEach(i=>{
       media.push({
         type:"image",
         url:i[1].replace(/\\u0026/g,"&")
@@ -65,11 +65,11 @@ module.exports = async function (req, res) {
       media:media
     })
 
-  }catch(e){
+  } catch(e){
 
     res.json({
       status:false,
-      message:e.message
+      message:"Server error"
     })
 
   }
