@@ -1,7 +1,6 @@
 {
   "name": "instagram-api",
   "version": "1.0.0",
-  "type": "module",
   "dependencies": {
     "axios": "^1.6.0",
     "cheerio": "^1.0.0"
