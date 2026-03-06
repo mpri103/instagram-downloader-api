@@ -1,81 +1,45 @@
 import axios from "axios"
+import cheerio from "cheerio"
 
-export default async function handler(req, res){
+export default async function handler(req, res) {
 
   const url = req.query.url
 
-  if(!url){
+  if (!url) {
     return res.json({
       status:false,
       message:"Missing URL"
     })
   }
 
-  try{
+  try {
 
-    // shortcode extract
-    const match = url.match(/(reel|p)\/([^/?]+)/)
-
-    if(!match){
-      return res.json({
-        status:false,
-        message:"Invalid Instagram URL"
-      })
-    }
-
-    const shortcode = match[2]
-
-    const apiUrl =
-      `https://www.instagram.com/api/v1/media/${shortcode}/info/`
-
-    const response = await axios.get(apiUrl,{
+    const response = await axios.get(url,{
       headers:{
-        "User-Agent":"Mozilla/5.0",
-        "X-IG-App-ID":"936619743392459"
+        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
       }
     })
 
-    const data = response.data.items[0]
+    const html = response.data
+    const $ = cheerio.load(html)
+
+    const video = $('meta[property="og:video"]').attr("content")
+    const image = $('meta[property="og:image"]').attr("content")
 
     let media=[]
 
-    // video
-    if(data.video_versions){
+    if(video){
       media.push({
         type:"video",
-        url:data.video_versions[0].url
+        url:video
       })
     }
 
-    // image
-    if(data.image_versions2){
+    if(image){
       media.push({
         type:"image",
-        url:data.image_versions2.candidates[0].url
+        url:image
       })
-    }
-
-    // carousel
-    if(data.carousel_media){
-
-      data.carousel_media.forEach(item=>{
-
-        if(item.video_versions){
-          media.push({
-            type:"video",
-            url:item.video_versions[0].url
-          })
-        }
-
-        if(item.image_versions2){
-          media.push({
-            type:"image",
-            url:item.image_versions2.candidates[0].url
-          })
-        }
-
-      })
-
     }
 
     return res.json({
@@ -83,11 +47,11 @@ export default async function handler(req, res){
       media:media
     })
 
-  }catch(e){
+  } catch(e){
 
     return res.json({
       status:false,
-      message:"Failed to fetch media"
+      message:"Could not fetch media"
     })
 
   }
