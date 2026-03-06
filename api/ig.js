@@ -1,80 +1,67 @@
 const axios = require("axios")
 
-module.exports = async function (req, res) {
+module.exports = async function(req,res){
 
-  try {
+try{
 
-    const { url } = req.query
+const {url} = req.query
 
-    if (!url) {
-      return res.json({
-        status:false,
-        message:"Missing URL"
-      })
-    }
+if(!url){
+return res.json({
+status:false,
+message:"Missing URL"
+})
+}
 
-    const response = await axios.get(url,{
-      headers:{
-        "User-Agent":
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)"
-      }
-    })
+// use embed endpoint
+const embedUrl = url + "embed/captioned/"
 
-    const html = response.data
+const response = await axios.get(embedUrl,{
+headers:{
+"User-Agent":"Mozilla/5.0"
+}
+})
 
-    let media = []
+const html = response.data
 
-    // VIDEO URLs
-    const videos = [
-      ...html.matchAll(/"video_url":"([^"]+)"/g)
-    ]
+let media=[]
 
-    videos.forEach(v=>{
-      media.push({
-        type:"video",
-        url:v[1].replace(/\\u0026/g,"&")
-      })
-    })
+// find all images
+const imgs=[...html.matchAll(/src="(https:\/\/[^"]+\.jpg[^"]*)"/g)]
 
-    // IMAGE URLs
-    const images = [
-      ...html.matchAll(/"display_url":"([^"]+)"/g)
-    ]
+imgs.forEach(i=>{
+media.push({
+type:"image",
+url:i[1]
+})
+})
 
-    images.forEach(i=>{
-      media.push({
-        type:"image",
-        url:i[1].replace(/\\u0026/g,"&")
-      })
-    })
+// remove duplicates
+media = media.filter(
+(v,i,a)=>a.findIndex(t=>t.url===v.url)===i
+)
 
-    // remove duplicates
-    media = media.filter(
-      (v,i,a)=>
-        a.findIndex(t=>t.url===v.url)===i
-    )
+if(media.length===0){
 
-    if(media.length === 0){
+return res.json({
+status:false,
+message:"Media not found"
+})
 
-      return res.json({
-        status:false,
-        message:"Media not found"
-      })
+}
 
-    }
+res.json({
+status:true,
+media:media
+})
 
-    res.json({
-      status:true,
-      media:media
-    })
+}catch(e){
 
-  } catch(e){
+res.json({
+status:false,
+message:"Server error"
+})
 
-    res.json({
-      status:false,
-      message:"Server error"
-    })
-
-  }
+}
 
 }
