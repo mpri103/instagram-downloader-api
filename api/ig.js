@@ -1,100 +1,68 @@
 const axios = require("axios")
+const cheerio = require("cheerio")
 
-module.exports = async function(req,res){
+module.exports = async function (req, res) {
 
- try{
+  try {
 
-  const { url } = req.query
+    const { url } = req.query
 
-  if(!url){
-   return res.json({
-    status:false,
-    message:"Missing URL"
-   })
-  }
-
-  // extract shortcode
-  const match = url.match(/(reel|p)\/([^/?]+)/)
-
-  if(!match){
-   return res.json({
-    status:false,
-    message:"Invalid Instagram URL"
-   })
-  }
-
-  const shortcode = match[2]
-
-  const apiUrl =
-   `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`
-
-  const response = await axios.get(apiUrl,{
-   headers:{
-    "User-Agent":"Mozilla/5.0",
-    "X-IG-App-ID":"936619743392459"
-   }
-  })
-
-  const mediaData =
-   response.data.graphql.shortcode_media
-
-  let media=[]
-
-  // video
-  if(mediaData.video_url){
-   media.push({
-    type:"video",
-    url:mediaData.video_url
-   })
-  }
-
-  // image
-  if(mediaData.display_url){
-   media.push({
-    type:"image",
-    url:mediaData.display_url
-   })
-  }
-
-  // carousel
-  if(mediaData.edge_sidecar_to_children){
-
-   mediaData.edge_sidecar_to_children.edges.forEach(item=>{
-
-    const node = item.node
-
-    if(node.is_video){
-
-     media.push({
-      type:"video",
-      url:node.video_url
-     })
-
-    }else{
-
-     media.push({
-      type:"image",
-      url:node.display_url
-     })
-
+    if (!url) {
+      return res.status(400).json({
+        status: false,
+        message: "Missing URL"
+      })
     }
 
-   })
+    const response = await axios.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+      }
+    })
+
+    const html = response.data
+    const $ = cheerio.load(html)
+
+    const video = $('meta[property="og:video"]').attr("content")
+    const image = $('meta[property="og:image"]').attr("content")
+
+    let media = []
+
+    if (video) {
+      media.push({
+        type: "video",
+        url: video
+      })
+    }
+
+    if (image) {
+      media.push({
+        type: "image",
+        url: image
+      })
+    }
+
+    if (media.length === 0) {
+      return res.json({
+        status: false,
+        message: "Media not found"
+      })
+    }
+
+    res.json({
+      status: true,
+      media: media
+    })
+
+  } catch (error) {
+
+    res.status(500).json({
+      status: false,
+      message: "Server error",
+      error: error.message
+    })
 
   }
-
-  res.json({
-   status:true,
-   media:media
-  })
-
- }catch(e){
-
-  res.json({
-   status:false,
-   message:"Failed to fetch media"
-  })
-
- }
 
 }
