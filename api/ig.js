@@ -1,4 +1,5 @@
 const axios = require("axios")
+const cheerio = require("cheerio")
 
 module.exports = async function (req, res) {
 
@@ -13,47 +14,41 @@ module.exports = async function (req, res) {
       })
     }
 
-    const response = await axios.get(url,{
+    // convert instagram -> ddinstagram
+    const newUrl = url.replace(
+      "instagram.com",
+      "ddinstagram.com"
+    )
+
+    const response = await axios.get(newUrl,{
       headers:{
-        "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent":"Mozilla/5.0"
       }
     })
 
     const html = response.data
+    const $ = cheerio.load(html)
 
-    // VIDEO MATCH
-    const videoMatch =
-      html.match(/"video_url":"([^"]+)"/)
+    const video =
+      $("meta[property='og:video']").attr("content")
 
-    // IMAGE MATCH
-    const imageMatch =
-      html.match(/"display_url":"([^"]+)"/)
+    const image =
+      $("meta[property='og:image']").attr("content")
 
     let media=[]
 
-    if(videoMatch){
-
-      const videoUrl =
-        videoMatch[1].replace(/\\u0026/g,"&")
-
+    if(video){
       media.push({
         type:"video",
-        url:videoUrl
+        url:video
       })
-
     }
 
-    if(imageMatch){
-
-      const imageUrl =
-        imageMatch[1].replace(/\\u0026/g,"&")
-
+    if(image){
       media.push({
         type:"image",
-        url:imageUrl
+        url:image
       })
-
     }
 
     if(media.length===0){
