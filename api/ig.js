@@ -1,67 +1,64 @@
 const axios = require("axios")
 
-module.exports = async function(req,res){
+module.exports = async function (req, res) {
 
-try{
+  try {
 
-const {url} = req.query
+    const { url } = req.query
 
-if(!url){
-return res.json({
-status:false,
-message:"Missing URL"
-})
-}
+    if (!url) {
+      return res.json({
+        status:false,
+        message:"Missing URL"
+      })
+    }
 
-// use embed endpoint
-const embedUrl = url + "embed/captioned/"
+    // extract shortcode
+    const match = url.match(/\/(reel|p)\/([^/?]+)/)
 
-const response = await axios.get(embedUrl,{
-headers:{
-"User-Agent":"Mozilla/5.0"
-}
-})
+    if (!match) {
+      return res.json({
+        status:false,
+        message:"Invalid Instagram URL"
+      })
+    }
 
-const html = response.data
+    const shortcode = match[2]
 
-let media=[]
+    const apiUrl =
+      `https://www.instagram.com/api/v1/oembed/?url=https://www.instagram.com/p/${shortcode}`
 
-// find all images
-const imgs=[...html.matchAll(/src="(https:\/\/[^"]+\.jpg[^"]*)"/g)]
+    const response = await axios.get(apiUrl,{
+      headers:{
+        "User-Agent":
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)"
+      }
+    })
 
-imgs.forEach(i=>{
-media.push({
-type:"image",
-url:i[1]
-})
-})
+    const media = []
 
-// remove duplicates
-media = media.filter(
-(v,i,a)=>a.findIndex(t=>t.url===v.url)===i
-)
+    // thumbnail (image)
+    if (response.data.thumbnail_url) {
 
-if(media.length===0){
+      media.push({
+        type:"image",
+        url:response.data.thumbnail_url
+      })
 
-return res.json({
-status:false,
-message:"Media not found"
-})
+    }
 
-}
+    res.json({
+      status:true,
+      media:media
+    })
 
-res.json({
-status:true,
-media:media
-})
+  } catch (e) {
 
-}catch(e){
+    res.json({
+      status:false,
+      message:"Failed to fetch media"
+    })
 
-res.json({
-status:false,
-message:"Server error"
-})
-
-}
+  }
 
 }
