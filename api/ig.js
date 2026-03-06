@@ -1,5 +1,4 @@
 const axios = require("axios")
-const cheerio = require("cheerio")
 
 module.exports = async function (req, res) {
 
@@ -8,59 +7,74 @@ module.exports = async function (req, res) {
     const { url } = req.query
 
     if (!url) {
-      return res.status(400).json({
-        status: false,
-        message: "Missing URL"
+      return res.json({
+        status:false,
+        message:"Missing URL"
       })
     }
 
-    const response = await axios.get(url, {
-      headers: {
+    const response = await axios.get(url,{
+      headers:{
         "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
       }
     })
 
     const html = response.data
-    const $ = cheerio.load(html)
 
-    const video = $('meta[property="og:video"]').attr("content")
-    const image = $('meta[property="og:image"]').attr("content")
+    // VIDEO MATCH
+    const videoMatch =
+      html.match(/"video_url":"([^"]+)"/)
 
-    let media = []
+    // IMAGE MATCH
+    const imageMatch =
+      html.match(/"display_url":"([^"]+)"/)
 
-    if (video) {
+    let media=[]
+
+    if(videoMatch){
+
+      const videoUrl =
+        videoMatch[1].replace(/\\u0026/g,"&")
+
       media.push({
-        type: "video",
-        url: video
+        type:"video",
+        url:videoUrl
       })
+
     }
 
-    if (image) {
+    if(imageMatch){
+
+      const imageUrl =
+        imageMatch[1].replace(/\\u0026/g,"&")
+
       media.push({
-        type: "image",
-        url: image
+        type:"image",
+        url:imageUrl
       })
+
     }
 
-    if (media.length === 0) {
+    if(media.length===0){
+
       return res.json({
-        status: false,
-        message: "Media not found"
+        status:false,
+        message:"Media not found"
       })
+
     }
 
     res.json({
-      status: true,
-      media: media
+      status:true,
+      media:media
     })
 
-  } catch (error) {
+  } catch(e){
 
-    res.status(500).json({
-      status: false,
-      message: "Server error",
-      error: error.message
+    res.json({
+      status:false,
+      message:"Server error"
     })
 
   }
