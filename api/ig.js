@@ -16,45 +16,48 @@ module.exports = async function (req, res) {
 
     const response = await axios.get(url, {
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        "User-Agent": "Mozilla/5.0"
       }
     })
 
     const html = response.data
-    const $ = cheerio.load(html)
-
     let media = []
 
     // extract JSON data
-    const jsonMatch = html.match(/window\._sharedData = (.*?);<\/script>/)
+    const jsonMatch = html.match(/"shortcode_media":({.*?})\,"viewer"/)
 
     if (jsonMatch) {
 
       const data = JSON.parse(jsonMatch[1])
-      const mediaData =
-        data.entry_data.PostPage[0].graphql.shortcode_media
 
-      // SINGLE VIDEO
-      if (mediaData.video_url) {
+      // SINGLE IMAGE
+      if (data.display_resources) {
+
+        const fullImage =
+          data.display_resources[
+            data.display_resources.length - 1
+          ].src
+
         media.push({
-          type: "video",
-          url: mediaData.video_url
+          type: "image",
+          url: fullImage
         })
       }
 
-      // SINGLE IMAGE
-      if (mediaData.display_url) {
+      // VIDEO
+      if (data.video_url) {
+
         media.push({
-          type: "image",
-          url: mediaData.display_url
+          type: "video",
+          url: data.video_url
         })
+
       }
 
       // CAROUSEL
-      if (mediaData.edge_sidecar_to_children) {
+      if (data.edge_sidecar_to_children) {
 
-        mediaData.edge_sidecar_to_children.edges.forEach(item => {
+        data.edge_sidecar_to_children.edges.forEach(item => {
 
           const node = item.node
 
@@ -67,37 +70,20 @@ module.exports = async function (req, res) {
 
           } else {
 
+            const fullImage =
+              node.display_resources[
+                node.display_resources.length - 1
+              ].src
+
             media.push({
               type: "image",
-              url: node.display_url
+              url: fullImage
             })
 
           }
 
         })
 
-      }
-
-    }
-
-    // fallback method
-    const video = $('meta[property="og:video"]').attr("content")
-    const image = $('meta[property="og:image"]').attr("content")
-
-    if (media.length === 0) {
-
-      if (video) {
-        media.push({
-          type: "video",
-          url: video
-        })
-      }
-
-      if (image) {
-        media.push({
-          type: "image",
-          url: image
-        })
       }
 
     }
