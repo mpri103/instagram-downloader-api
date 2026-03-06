@@ -13,49 +13,36 @@ module.exports = async function (req, res) {
       })
     }
 
-    const response = await axios.get(url,{
+    // extract shortcode
+    const match = url.match(/\/(reel|p)\/([^/?]+)/)
+
+    if (!match) {
+      return res.json({
+        status:false,
+        message:"Invalid Instagram URL"
+      })
+    }
+
+    const shortcode = match[2]
+
+    const apiUrl =
+      `https://www.instagram.com/api/v1/oembed/?url=https://www.instagram.com/p/${shortcode}`
+
+    const response = await axios.get(apiUrl,{
       headers:{
-        "User-Agent":"Mozilla/5.0"
+        "User-Agent":
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X)"
       }
     })
 
-    const html = response.data
+    const media = []
 
-    let media=[]
+    // thumbnail (image)
+    if (response.data.thumbnail_url) {
 
-    // find video urls
-    const videos =
-      [...html.matchAll(/"video_url":"([^"]+)"/g)]
-
-    videos.forEach(v=>{
-      media.push({
-        type:"video",
-        url:v[1].replace(/\\u0026/g,"&")
-      })
-    })
-
-    // find images
-    const images =
-      [...html.matchAll(/"display_url":"([^"]+)"/g)]
-
-    images.forEach(i=>{
       media.push({
         type:"image",
-        url:i[1].replace(/\\u0026/g,"&")
-      })
-    })
-
-    // remove duplicates
-    media = media.filter(
-      (v,i,a)=>
-        a.findIndex(t=>t.url===v.url)===i
-    )
-
-    if(media.length===0){
-
-      return res.json({
-        status:false,
-        message:"Media not found"
+        url:response.data.thumbnail_url
       })
 
     }
@@ -65,11 +52,11 @@ module.exports = async function (req, res) {
       media:media
     })
 
-  } catch(e){
+  } catch (e) {
 
     res.json({
       status:false,
-      message:"Server error"
+      message:"Failed to fetch media"
     })
 
   }
