@@ -1,22 +1,23 @@
-import axios from "axios"
-import cheerio from "cheerio"
+const axios = require("axios")
+const cheerio = require("cheerio")
 
-export default async function handler(req, res) {
-
-  const url = req.query.url
-
-  if (!url) {
-    return res.json({
-      status:false,
-      message:"Missing URL"
-    })
-  }
+module.exports = async function (req, res) {
 
   try {
 
-    const response = await axios.get(url,{
-      headers:{
-        "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    const { url } = req.query
+
+    if (!url) {
+      return res.status(400).json({
+        status: false,
+        message: "Missing URL"
+      })
+    }
+
+    const response = await axios.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
       }
     })
 
@@ -26,32 +27,40 @@ export default async function handler(req, res) {
     const video = $('meta[property="og:video"]').attr("content")
     const image = $('meta[property="og:image"]').attr("content")
 
-    let media=[]
+    let media = []
 
-    if(video){
+    if (video) {
       media.push({
-        type:"video",
-        url:video
+        type: "video",
+        url: video
       })
     }
 
-    if(image){
+    if (image) {
       media.push({
-        type:"image",
-        url:image
+        type: "image",
+        url: image
       })
     }
 
-    return res.json({
-      status:true,
-      media:media
+    if (media.length === 0) {
+      return res.json({
+        status: false,
+        message: "Media not found"
+      })
+    }
+
+    res.json({
+      status: true,
+      media: media
     })
 
-  } catch(e){
+  } catch (error) {
 
-    return res.json({
-      status:false,
-      message:"Could not fetch media"
+    res.status(500).json({
+      status: false,
+      message: "Server error",
+      error: error.message
     })
 
   }
