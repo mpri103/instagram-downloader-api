@@ -101,6 +101,79 @@ function mapRawItem(item, defaultType = null) {
   };
 }
 
+let sessionRotationIndex = 0;
+
+function parseSessionPool(rawPool) {
+  if (!rawPool) return [];
+  return rawPool.split(/[\n,;]+/).map(s => s.trim()).filter(s => s.length > 5);
+}
+
+function getSessionPool() {
+  const poolRaw = process.env.IG_SESSION_POOL || process.env.IG_SESSION_IDS || "";
+  let sessions = parseSessionPool(poolRaw);
+
+  const singleSession = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g";
+
+  if (singleSession && !sessions.includes(singleSession)) {
+    sessions.push(singleSession);
+  }
+
+  return sessions.length > 0 ? sessions : ["43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g"];
+}
+
+function getNextRotatedSession(sessions) {
+  if (!sessions || sessions.length === 0) return "";
+  if (sessions.length === 1) return sessions[0];
+  sessionRotationIndex = (sessionRotationIndex + 1) % sessions.length;
+  return sessions[sessionRotationIndex];
+}
+
+async function fetchUserStories(userId, sessionCookie) {
+  try {
+    const session = sessionCookie?.trim() || "";
+    const cookieUserId = getUserIdFromSession(session);
+    const storyUrl = `https://i.instagram.com/api/v1/feed/user/${userId}/story/`;
+    const res = await fetch(storyUrl, {
+      headers: {
+        ...DEFAULT_HEADERS,
+        "Cookie": `sessionid=${session}; ds_user_id=${cookieUserId};`
+      }
+    });
+    if (!res.ok) return [];
+    const data = await res.json().catch(() => null);
+    if (!data || !data.reel || !Array.isArray(data.reel.items)) return [];
+    return data.reel.items.map(item => mapRawItem(item));
+  } catch (err) {
+    return [];
+  }
+}
+
+async function fetchUserHighlights(userId, sessionCookie) {
+  try {
+    const session = sessionCookie?.trim() || "";
+    const cookieUserId = getUserIdFromSession(session);
+    const hlUrl = `https://i.instagram.com/api/v1/highlights/${userId}/highlights_tray/`;
+    const res = await fetch(hlUrl, {
+      headers: {
+        ...DEFAULT_HEADERS,
+        "Cookie": `sessionid=${session}; ds_user_id=${cookieUserId};`
+      }
+    });
+    if (!res.ok) return [];
+    const data = await res.json().catch(() => null);
+    if (!data || !Array.isArray(data.tray)) return [];
+    return data.tray.map(t => ({
+      id: t.id,
+      title: t.title || "Highlight",
+      cover_url: t.cover_media?.cropped_image_version?.url || t.cover_media?.image_versions2?.candidates?.[0]?.url || "",
+      media_count: t.media_count || (t.items ? t.items.length : 0),
+      items: Array.isArray(t.items) ? t.items.map(it => mapRawItem(it)) : []
+    }));
+  } catch (err) {
+    return [];
+  }
+}
+
 async function fetchProfileData(username, sessionCookie) {
   try {
     const session = sessionCookie?.trim() || "";
@@ -202,6 +275,12 @@ async function fetchProfileData(username, sessionCookie) {
       console.warn("Clips fetch error:", e);
     }
 
+    // Step 4: Fetch Active Stories & Highlights (Parallel)
+    const [storiesList, highlightsList] = await Promise.all([
+      fetchUserStories(userObj.pk, session).catch(() => []),
+      fetchUserHighlights(userObj.pk, session).catch(() => [])
+    ]);
+
     // Ensure all video posts from timeline feed are also included in reelsList
     const existingReelCodes = new Set(reelsList.map(r => r.code));
     for (const p of feedPosts) {
@@ -215,7 +294,7 @@ async function fetchProfileData(username, sessionCookie) {
     const combinedMedia = [];
     const seenCodes = new Set();
 
-    for (const p of [...feedPosts, ...reelsList]) {
+    for (const p of [...feedPosts, ...reelsList, ...storiesList]) {
       if (p.code && !seenCodes.has(p.code)) {
         seenCodes.add(p.code);
         combinedMedia.push(p);
@@ -237,6 +316,8 @@ async function fetchProfileData(username, sessionCookie) {
       },
       posts_count: feedPosts.length,
       reels_count: reelsList.length,
+      stories_count: storiesList.length,
+      highlights_count: highlightsList.length,
       total_media_count: combinedMedia.length,
       posts_next_max_id: postsNextMaxId,
       posts_has_more: postsHasMore,
@@ -244,6 +325,8 @@ async function fetchProfileData(username, sessionCookie) {
       reels_has_more: reelsHasMore,
       posts: feedPosts,
       reels: reelsList,
+      stories: storiesList,
+      highlights: highlightsList,
       media: combinedMedia
     };
 
@@ -510,7 +593,8 @@ module.exports = async function handler(req, res) {
 
   try {
     const action = req.query.action || (req.body && req.body.action);
-    const sessionCookie = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g";
+    const sessionPool = getSessionPool();
+    const sessionCookie = getNextRotatedSession(sessionPool);
 
     // 0. IMAGE & MEDIA PROXY HANDLER (Fixes Hotlinking / CDN CORS)
     if (action === "proxy") {
@@ -561,6 +645,17 @@ module.exports = async function handler(req, res) {
       return res.status(404).json({ status: false, message: "No more items available or rate limited." });
     }
 
+    // 0.6. DEDICATED ACTIVE STORIES HANDLER
+    if (action === "stories") {
+      const targetUserId = req.query.user_id || (req.body && req.body.user_id);
+      if (!targetUserId) {
+        return res.status(400).json({ status: false, message: "Missing user_id parameter for stories" });
+      }
+
+      const stories = await fetchUserStories(targetUserId, sessionCookie);
+      return res.status(200).json({ status: true, type: "stories", user_id: targetUserId, items: stories });
+    }
+
     const targetQuery = req.query.url || (req.body && req.body.url);
 
     if (!targetQuery) {
@@ -570,16 +665,18 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 1. PROFILE INITIAL SEARCH HANDLER
+    // 1. PROFILE INITIAL SEARCH HANDLER (With Multi-Session Failover)
     const username = getUsernameFromQuery(targetQuery);
     if (username) {
-      const profileResult = await fetchProfileData(username, sessionCookie);
-      if (profileResult && profileResult.user) {
-        return res.status(200).json(profileResult);
+      for (const currentSession of [sessionCookie, ...sessionPool.filter(s => s !== sessionCookie)]) {
+        const profileResult = await fetchProfileData(username, currentSession);
+        if (profileResult && profileResult.user) {
+          return res.status(200).json(profileResult);
+        }
       }
     }
 
-    // 2. MEDIA HANDLER
+    // 2. MEDIA HANDLER (With Multi-Session Failover)
     const shortcode = getShortcode(targetQuery);
     if (!shortcode) {
       return res.status(400).json({
@@ -591,7 +688,11 @@ module.exports = async function handler(req, res) {
     const mediaId = shortcodeToId(shortcode);
     const cleanUrl = `https://www.instagram.com/p/${shortcode}/`;
 
-    let result = await fetchViaMobileApi(mediaId, sessionCookie);
+    let result = null;
+    for (const currentSession of [sessionCookie, ...sessionPool.filter(s => s !== sessionCookie)]) {
+      result = await fetchViaMobileApi(mediaId, currentSession);
+      if (result && result.media && result.media.length > 0) break;
+    }
 
     if (!result || !result.media || result.media.length === 0) {
       result = await fetchViaSnapSave(cleanUrl);
