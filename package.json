@@ -1,8 +1,10 @@
 {
   "name": "instagram-api",
   "version": "1.0.0",
+  "description": "Instagram Media Downloader API for Vercel",
+  "main": "api/ig.js",
   "dependencies": {
-    "axios": "^1.6.0",
+    "axios": "^1.7.2",
     "cheerio": "^1.0.0"
   }
 }
