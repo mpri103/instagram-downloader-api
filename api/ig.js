@@ -69,7 +69,7 @@ function mapRawItem(item, defaultType = null) {
   const isVideo = media.media_type === 2 || !!media.video_versions || defaultType === "video";
   const isCarousel = media.media_type === 8 || !!media.carousel_media;
   let videoUrl = media.video_versions?.[0]?.url;
-  let thumbUrl = media.image_versions2?.candidates?.[0]?.url;
+  let thumbUrl = media.image_versions2?.candidates?.[0]?.url || media.display_url || media.thumbnail_src;
 
   let carouselSlides = [];
   if (isCarousel && media.carousel_media?.length > 0) {
@@ -79,10 +79,17 @@ function mapRawItem(item, defaultType = null) {
 
     carouselSlides = media.carousel_media.map((sub, i) => {
       const subIsVid = sub.media_type === 2 || !!sub.video_versions;
+      const subVidUrl = sub.video_versions?.[0]?.url;
+      const subImgUrl = sub.image_versions2?.candidates?.[0]?.url 
+        || sub.image_versions?.candidates?.[0]?.url 
+        || sub.display_url 
+        || sub.thumbnail_src 
+        || sub.url 
+        || "";
       return {
         type: subIsVid ? "video" : "image",
-        url: sub.video_versions?.[0]?.url || sub.image_versions2?.candidates?.[0]?.url,
-        thumbnail: sub.image_versions2?.candidates?.[0]?.url || ""
+        url: subIsVid ? (subVidUrl || subImgUrl) : subImgUrl,
+        thumbnail: subImgUrl || subVidUrl || ""
       };
     });
   }
