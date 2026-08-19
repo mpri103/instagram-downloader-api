@@ -71,10 +71,20 @@ function mapRawItem(item, defaultType = null) {
   let videoUrl = media.video_versions?.[0]?.url;
   let thumbUrl = media.image_versions2?.candidates?.[0]?.url;
 
+  let carouselSlides = [];
   if (isCarousel && media.carousel_media?.length > 0) {
     const first = media.carousel_media[0];
     if (first.video_versions) videoUrl = first.video_versions[0].url;
     thumbUrl = first.image_versions2?.candidates?.[0]?.url || thumbUrl;
+
+    carouselSlides = media.carousel_media.map((sub, i) => {
+      const subIsVid = sub.media_type === 2 || !!sub.video_versions;
+      return {
+        type: subIsVid ? "video" : "image",
+        url: sub.video_versions?.[0]?.url || sub.image_versions2?.candidates?.[0]?.url,
+        thumbnail: sub.image_versions2?.candidates?.[0]?.url || ""
+      };
+    });
   }
 
   return {
@@ -86,7 +96,8 @@ function mapRawItem(item, defaultType = null) {
     caption: media.caption?.text || "",
     like_count: media.like_count || 0,
     comment_count: media.comment_count || 0,
-    play_count: media.play_count || media.view_count || 0
+    play_count: media.play_count || media.view_count || 0,
+    carousel_media: carouselSlides
   };
 }
 
