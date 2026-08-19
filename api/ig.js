@@ -503,7 +503,39 @@ module.exports = async function handler(req, res) {
     const action = req.query.action || (req.body && req.body.action);
     const sessionCookie = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g";
 
-    // 0. ON-DEMAND DYNAMIC PAGINATION HANDLER
+    // 0. IMAGE & MEDIA PROXY HANDLER (Fixes Hotlinking / CDN CORS)
+    if (action === "proxy") {
+      const imageUrl = req.query.url || (req.body && req.body.url);
+      if (!imageUrl) {
+        return res.status(400).send("Missing url parameter");
+      }
+
+      try {
+        const imgRes = await fetch(imageUrl, {
+          headers: {
+            "User-Agent": "Instagram 278.0.0.19.115 Android (33/13; 480dpi; 1080x2400; Xiaomi; M2012K11AC; alioth; qcom; en_US; 461141443)",
+            "X-IG-App-ID": "1217981644879628",
+            "Accept": "image/*,*/*;q=0.8"
+          }
+        });
+
+        if (!imgRes.ok) {
+          return res.status(imgRes.status).send("Failed to fetch image from CDN");
+        }
+
+        const contentType = imgRes.headers.get("content-type") || "image/jpeg";
+        const buffer = Buffer.from(await imgRes.arrayBuffer());
+
+        res.setHeader("Content-Type", contentType);
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        return res.status(200).send(buffer);
+      } catch (e) {
+        return res.status(500).send("Proxy error");
+      }
+    }
+
+    // 0.5. ON-DEMAND DYNAMIC PAGINATION HANDLER
     if (action === "paginate") {
       const targetUserId = req.query.user_id || (req.body && req.body.user_id);
       const feedType = req.query.feed_type || (req.body && req.body.feed_type) || "posts";
