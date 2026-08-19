@@ -1,6 +1,7 @@
 /**
- * Vercel Serverless Function - Instagram Media & Full Profile Downloader API
+ * Vercel Serverless Function - Instagram Media, Full Profile & On-Demand Infinite Scraper API
  * Endpoint: /api/ig?url={INSTAGRAM_URL_OR_USERNAME}
+ * Pagination: /api/ig?action=paginate&user_id={USER_ID}&feed_type=posts|reels&max_id={MAX_ID}
  */
 
 const DEFAULT_HEADERS = {
@@ -63,11 +64,38 @@ function getUserIdFromSession(session) {
   return parts[0] || "";
 }
 
+function mapRawItem(item, defaultType = null) {
+  const media = item.media || item;
+  const isVideo = media.media_type === 2 || !!media.video_versions || defaultType === "video";
+  const isCarousel = media.media_type === 8 || !!media.carousel_media;
+  let videoUrl = media.video_versions?.[0]?.url;
+  let thumbUrl = media.image_versions2?.candidates?.[0]?.url;
+
+  if (isCarousel && media.carousel_media?.length > 0) {
+    const first = media.carousel_media[0];
+    if (first.video_versions) videoUrl = first.video_versions[0].url;
+    thumbUrl = first.image_versions2?.candidates?.[0]?.url || thumbUrl;
+  }
+
+  return {
+    id: media.id,
+    code: media.code,
+    type: isVideo ? "video" : (isCarousel ? "carousel" : "image"),
+    url: videoUrl || thumbUrl,
+    thumbnail: thumbUrl,
+    caption: media.caption?.text || "",
+    like_count: media.like_count || 0,
+    comment_count: media.comment_count || 0,
+    play_count: media.play_count || media.view_count || 0
+  };
+}
+
 async function fetchProfileData(username, sessionCookie) {
   try {
     const session = sessionCookie?.trim() || "";
     const userId = getUserIdFromSession(session);
 
+    // Step 1: User Lookup via topsearch
     const searchUrl = `https://www.instagram.com/web/search/topsearch/?query=${encodeURIComponent(username)}`;
     const searchRes = await fetch(searchUrl, {
       headers: {
@@ -89,13 +117,16 @@ async function fetchProfileData(username, sessionCookie) {
     if (!userObj) userObj = searchData.users[0].user;
 
     const rawPic = userObj.profile_pic_url || "";
-    const hdPic = rawPic.replace(/s150x150/g, "s1080x1080");
+    const hdPic = userObj.hd_profile_pic_url_info?.url || rawPic;
 
-    // Step 2: Fetch Maximum Recent Feed Posts / Reels via user feed pagination
-    let mediaItems = [];
+    // Step 2: Fetch Initial Batch of Timeline Feed Posts (2 Pages = 24 items)
+    let feedPosts = [];
+    let postsNextMaxId = null;
+    let postsHasMore = false;
+
     try {
       let maxId = "";
-      const maxPages = 3; // Fetches up to 36-40+ posts per profile
+      const maxPages = 2;
 
       for (let page = 0; page < maxPages; page++) {
         const feedUrl = `https://i.instagram.com/api/v1/feed/user/${userObj.pk}/${maxId ? `?max_id=${maxId}` : ''}`;
@@ -112,34 +143,63 @@ async function fetchProfileData(username, sessionCookie) {
         if (!feedData || !Array.isArray(feedData.items) || feedData.items.length === 0) break;
 
         for (const item of feedData.items) {
-          const isVideo = item.media_type === 2 || !!item.video_versions;
-          const isCarousel = item.media_type === 8 || !!item.carousel_media;
-          let videoUrl = item.video_versions?.[0]?.url;
-          let thumbUrl = item.image_versions2?.candidates?.[0]?.url;
-
-          if (isCarousel && item.carousel_media?.length > 0) {
-            const first = item.carousel_media[0];
-            if (first.video_versions) videoUrl = first.video_versions[0].url;
-            thumbUrl = first.image_versions2?.candidates?.[0]?.url || thumbUrl;
-          }
-
-          mediaItems.push({
-            id: item.id,
-            code: item.code,
-            type: isVideo ? "video" : (isCarousel ? "carousel" : "image"),
-            url: videoUrl || thumbUrl,
-            thumbnail: thumbUrl,
-            caption: item.caption?.text || "",
-            like_count: item.like_count || 0,
-            comment_count: item.comment_count || 0
-          });
+          feedPosts.push(mapRawItem(item));
         }
 
         maxId = feedData.next_max_id;
+        postsNextMaxId = maxId || null;
+        postsHasMore = !!feedData.more_available && !!maxId;
+
         if (!maxId || !feedData.more_available) break;
       }
     } catch (e) {
       console.warn("Feed fetch error:", e);
+    }
+
+    // Step 3: Fetch Initial Batch of Dedicated Clips (Reels Tab)
+    let reelsList = [];
+    let reelsNextMaxId = null;
+    let reelsHasMore = false;
+
+    try {
+      const clipsUrl = "https://i.instagram.com/api/v1/clips/user/";
+      const form = new URLSearchParams();
+      form.append("target_user_id", userObj.pk);
+      form.append("page_size", "24");
+
+      const clipsRes = await fetch(clipsUrl, {
+        method: "POST",
+        headers: {
+          ...DEFAULT_HEADERS,
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "Cookie": `sessionid=${session}; ds_user_id=${userId};`
+        },
+        body: form.toString()
+      });
+
+      if (clipsRes.ok) {
+        const clipsData = await clipsRes.json().catch(() => null);
+        if (clipsData && Array.isArray(clipsData.items)) {
+          for (const item of clipsData.items) {
+            reelsList.push(mapRawItem(item, "video"));
+          }
+          reelsNextMaxId = clipsData.paging_info?.max_id || clipsData.next_max_id || null;
+          reelsHasMore = !!clipsData.paging_info?.more_available;
+        }
+      }
+    } catch (e) {
+      console.warn("Clips fetch error:", e);
+    }
+
+    // Combined unique media list
+    const combinedMedia = [];
+    const seenCodes = new Set();
+
+    for (const p of [...feedPosts, ...reelsList]) {
+      if (p.code && !seenCodes.has(p.code)) {
+        seenCodes.add(p.code);
+        combinedMedia.push(p);
+      }
     }
 
     return {
@@ -155,12 +215,84 @@ async function fetchProfileData(username, sessionCookie) {
         profile_pic: rawPic,
         profile_pic_hd: hdPic
       },
-      media_count: mediaItems.length,
-      media: mediaItems
+      posts_count: feedPosts.length,
+      reels_count: reelsList.length,
+      total_media_count: combinedMedia.length,
+      posts_next_max_id: postsNextMaxId,
+      posts_has_more: postsHasMore,
+      reels_next_max_id: reelsNextMaxId,
+      reels_has_more: reelsHasMore,
+      posts: feedPosts,
+      reels: reelsList,
+      media: combinedMedia
     };
 
   } catch (err) {
     console.error("Profile Scraper Error:", err);
+    return null;
+  }
+}
+
+async function fetchPaginatedFeed(userId, feedType, maxId, sessionCookie) {
+  try {
+    const session = sessionCookie?.trim() || "";
+    const cookieUserId = getUserIdFromSession(session);
+
+    if (feedType === "reels") {
+      const clipsUrl = "https://i.instagram.com/api/v1/clips/user/";
+      const form = new URLSearchParams();
+      form.append("target_user_id", userId);
+      form.append("page_size", "12");
+      if (maxId) form.append("max_id", maxId);
+
+      const clipsRes = await fetch(clipsUrl, {
+        method: "POST",
+        headers: {
+          ...DEFAULT_HEADERS,
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "Cookie": `sessionid=${session}; ds_user_id=${cookieUserId};`
+        },
+        body: form.toString()
+      });
+
+      if (!clipsRes.ok) return null;
+      const clipsData = await clipsRes.json().catch(() => null);
+      if (!clipsData || !Array.isArray(clipsData.items)) return null;
+
+      const items = clipsData.items.map(i => mapRawItem(i, "video"));
+      return {
+        status: true,
+        type: "pagination",
+        feed_type: "reels",
+        items: items,
+        next_max_id: clipsData.paging_info?.max_id || clipsData.next_max_id || null,
+        has_more: !!clipsData.paging_info?.more_available
+      };
+    } else {
+      const feedUrl = `https://i.instagram.com/api/v1/feed/user/${userId}/?max_id=${maxId || ''}`;
+      const feedRes = await fetch(feedUrl, {
+        headers: {
+          ...DEFAULT_HEADERS,
+          "Cookie": `sessionid=${session}; ds_user_id=${cookieUserId};`
+        }
+      });
+
+      if (!feedRes.ok) return null;
+      const feedData = await feedRes.json().catch(() => null);
+      if (!feedData || !Array.isArray(feedData.items)) return null;
+
+      const items = feedData.items.map(i => mapRawItem(i));
+      return {
+        status: true,
+        type: "pagination",
+        feed_type: "posts",
+        items: items,
+        next_max_id: feedData.next_max_id || null,
+        has_more: !!feedData.more_available && !!feedData.next_max_id
+      };
+    }
+  } catch (err) {
+    console.error("Pagination error:", err);
     return null;
   }
 }
@@ -347,7 +479,7 @@ async function fetchViaOEmbed(shortcode) {
   }
 }
 
-module.exports = async (req, res) => {
+module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -357,10 +489,27 @@ module.exports = async (req, res) => {
   }
 
   try {
-    let targetQuery = req.query.url;
-    if (!targetQuery && req.body && req.body.url) {
-      targetQuery = req.body.url;
+    const action = req.query.action || (req.body && req.body.action);
+    const sessionCookie = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g";
+
+    // 0. ON-DEMAND DYNAMIC PAGINATION HANDLER
+    if (action === "paginate") {
+      const targetUserId = req.query.user_id || (req.body && req.body.user_id);
+      const feedType = req.query.feed_type || (req.body && req.body.feed_type) || "posts";
+      const maxId = req.query.max_id || (req.body && req.body.max_id) || "";
+
+      if (!targetUserId) {
+        return res.status(400).json({ status: false, message: "Missing user_id for pagination" });
+      }
+
+      const paginatedResult = await fetchPaginatedFeed(targetUserId, feedType, maxId, sessionCookie);
+      if (paginatedResult) {
+        return res.status(200).json(paginatedResult);
+      }
+      return res.status(404).json({ status: false, message: "No more items available or rate limited." });
     }
+
+    const targetQuery = req.query.url || (req.body && req.body.url);
 
     if (!targetQuery) {
       return res.status(400).json({
@@ -369,9 +518,7 @@ module.exports = async (req, res) => {
       });
     }
 
-    const sessionCookie = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g";
-
-    // 1. PROFILE HANDLER
+    // 1. PROFILE INITIAL SEARCH HANDLER
     const username = getUsernameFromQuery(targetQuery);
     if (username) {
       const profileResult = await fetchProfileData(username, sessionCookie);
