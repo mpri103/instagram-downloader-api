@@ -2,19 +2,20 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 
 /**
- * Common Browser & App Headers
+ * Helper: Convert Instagram shortcode to numeric media ID
  */
-const DEFAULT_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 289.0.0.25.105",
-  "Accept": "*/*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Sec-Fetch-Site": "same-origin",
-  "X-IG-App-ID": "936619743392459",
-  "X-ASBD-ID": "129477",
-  "X-IG-WWW-Claim": "0",
-  "Origin": "https://www.instagram.com",
-  "Referer": "https://www.instagram.com/",
-};
+function shortcodeToId(shortcode) {
+  if (!shortcode) return null;
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  let id = BigInt(0);
+  for (let i = 0; i < shortcode.length; i++) {
+    const char = shortcode[i];
+    const index = BigInt(alphabet.indexOf(char));
+    if (index === -1n) continue;
+    id = id * BigInt(64) + index;
+  }
+  return id.toString();
+}
 
 /**
  * Helper: Extract shortcode from any Instagram URL
@@ -28,31 +29,50 @@ function getShortcode(url) {
 }
 
 /**
- * Method 1: Official Instagram App/Web API (Requires Cookie for 100% video & carousel extraction)
+ * Helper: Extract ds_user_id from sessionid
  */
-async function fetchViaInstagramApi(shortcode, sessionCookie) {
+function getUserIdFromSession(session) {
+  if (!session) return "";
+  const decoded = decodeURIComponent(session);
+  const parts = decoded.split(":");
+  return parts[0] || "";
+}
+
+/**
+ * Method 1: Official Instagram Mobile App API (100% Video, Carousel & HD Photos)
+ */
+async function fetchViaMobileApi(mediaId, sessionCookie) {
   try {
-    const apiUrl = `https://www.instagram.com/api/v1/media/shortcode/${shortcode}`;
-    const headers = { ...DEFAULT_HEADERS };
+    const url = `https://i.instagram.com/api/v1/media/${mediaId}/info/`;
+    const userId = getUserIdFromSession(sessionCookie);
+
+    const headers = {
+      "User-Agent": "Instagram 278.0.0.19.115 Android (33/13; 480dpi; 1080x2400; Xiaomi; M2012K11AC; alioth; qcom; en_US; 461141443)",
+      "X-IG-App-ID": "1217981644879628",
+      "Accept": "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+    };
 
     if (sessionCookie) {
-      const cleanCookie = sessionCookie.trim();
-      headers["Cookie"] = cleanCookie.includes("sessionid=") ? cleanCookie : `sessionid=${cleanCookie};`;
+      const cleanSession = sessionCookie.trim();
+      headers["Cookie"] = `sessionid=${cleanSession}; ds_user_id=${userId};`;
     }
 
-    const res = await axios.get(apiUrl, {
+    const res = await axios.get(url, {
       headers: headers,
-      timeout: 7000,
+      timeout: 8000,
       validateStatus: (status) => status < 400
     });
 
-    if (!res.data || !res.data.items || res.data.items.length === 0) return null;
+    if (!res.data || !res.data.items || res.data.items.length === 0) {
+      return null;
+    }
 
     const item = res.data.items[0];
     const caption = item.caption ? item.caption.text : "";
     const media = [];
 
-    // Check for Carousel (Album with multiple photos/videos)
+    // 1. CAROUSEL POST (Multi-photo & multi-video album)
     if (item.carousel_media && Array.isArray(item.carousel_media) && item.carousel_media.length > 0) {
       for (const sub of item.carousel_media) {
         if (sub.video_versions && sub.video_versions.length > 0) {
@@ -68,16 +88,16 @@ async function fetchViaInstagramApi(shortcode, sessionCookie) {
           });
         }
       }
-    } 
-    // Single Video / Reel
+    }
+    // 2. SINGLE REEL / VIDEO
     else if (item.video_versions && item.video_versions.length > 0) {
       media.push({
         type: "video",
         url: item.video_versions[0].url,
         thumbnail: item.image_versions2?.candidates?.[0]?.url || ""
       });
-    } 
-    // Single Image
+    }
+    // 3. SINGLE PHOTO
     else if (item.image_versions2?.candidates?.length > 0) {
       media.push({
         type: "image",
@@ -88,10 +108,81 @@ async function fetchViaInstagramApi(shortcode, sessionCookie) {
     if (media.length > 0) {
       return {
         status: true,
-        source: sessionCookie ? "instagram_authenticated" : "instagram_api",
+        source: sessionCookie ? "instagram_mobile_authenticated" : "instagram_mobile_api",
         caption: caption,
         media: media
       };
+    }
+
+    return null;
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Method 2: SnapSave Scraper
+ */
+async function fetchViaSnapSave(url) {
+  try {
+    const form = new URLSearchParams();
+    form.append("url", url);
+
+    const res = await axios.post("https://snapsave.app/action.php?lang=en", form.toString(), {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://snapsave.app/"
+      },
+      timeout: 6000
+    });
+
+    if (!res.data) return null;
+
+    let html = res.data;
+    if (html.includes("eval(")) {
+      try {
+        const modified = html.replace(/\beval\s*\(/g, "return (");
+        const fn = new Function(modified);
+        const inner = fn();
+        if (inner && typeof inner === "string") html = inner;
+      } catch (e) {}
+    }
+
+    const $ = cheerio.load(html);
+    const media = [];
+
+    $("div.download-items, div.media-box, tbody tr").each((i, el) => {
+      const downloadBtn = $(el).find('a.btn-download, a.download-bottom, a[href*="download"]');
+      let href = downloadBtn.attr("href");
+      const thumb = $(el).find("img").attr("src") || "";
+
+      if (href) {
+        if (!href.startsWith("http")) href = "https://snapsave.app" + href;
+        const isVideo = href.includes(".mp4") || href.includes("video") || downloadBtn.text().toLowerCase().includes("video");
+        media.push({
+          type: isVideo ? "video" : "image",
+          url: href,
+          thumbnail: thumb
+        });
+      }
+    });
+
+    if (media.length === 0) {
+      $('a.download-bottom, a[href*="download"], a.btn-download').each((i, el) => {
+        let href = $(el).attr("href");
+        if (href) {
+          if (!href.startsWith("http")) href = "https://snapsave.app" + href;
+          media.push({
+            type: href.includes(".mp4") || $(el).text().toLowerCase().includes("video") ? "video" : "image",
+            url: href
+          });
+        }
+      });
+    }
+
+    if (media.length > 0) {
+      return { status: true, source: "snapsave", caption: "", media };
     }
     return null;
   } catch (err) {
@@ -100,54 +191,7 @@ async function fetchViaInstagramApi(shortcode, sessionCookie) {
 }
 
 /**
- * Method 2: RapidAPI Instagram Downloader (Optional key in env: RAPID_API_KEY)
- */
-async function fetchViaRapidApi(url, apiKey) {
-  if (!apiKey) return null;
-  try {
-    const res = await axios.get("https://instagram-downloader-download-instagram-videos-stories1.p.rapidapi.com/get-info", {
-      params: { url: url },
-      headers: {
-        "X-RapidAPI-Key": apiKey,
-        "X-RapidAPI-Host": "instagram-downloader-download-instagram-videos-stories1.p.rapidapi.com"
-      },
-      timeout: 8000
-    });
-
-    if (res.data) {
-      const data = res.data;
-      const media = [];
-
-      if (Array.isArray(data)) {
-        for (const m of data) {
-          if (m.download_url) {
-            media.push({
-              type: m.type === "video" || m.download_url.includes(".mp4") ? "video" : "image",
-              url: m.download_url,
-              thumbnail: m.thumb || ""
-            });
-          }
-        }
-      } else if (data.download_url) {
-        media.push({
-          type: data.type === "video" || data.download_url.includes(".mp4") ? "video" : "image",
-          url: data.download_url,
-          thumbnail: data.thumb || ""
-        });
-      }
-
-      if (media.length > 0) {
-        return { status: true, source: "rapidapi", caption: data.caption || "", media };
-      }
-    }
-    return null;
-  } catch (e) {
-    return null;
-  }
-}
-
-/**
- * Method 3: Embed Page Scraper (Fallback for video tags)
+ * Method 3: Instagram Embed HTML Scraper
  */
 async function fetchViaEmbed(shortcode) {
   try {
@@ -260,15 +304,16 @@ module.exports = async function (req, res) {
       });
     }
 
-    const sessionCookie = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "";
-    const rapidApiKey = process.env.RAPID_API_KEY || "";
+    const mediaId = shortcodeToId(shortcode);
+    const sessionCookie = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g";
+    const cleanUrl = `https://www.instagram.com/p/${shortcode}/`;
 
-    // 1. Direct Instagram API (Supports Cookie for 100% Video & Carousel)
-    let result = await fetchViaInstagramApi(shortcode, sessionCookie);
+    // 1. Mobile App API (100% Video & Carousel Support)
+    let result = await fetchViaMobileApi(mediaId, sessionCookie);
 
-    // 2. RapidAPI (if configured in env)
+    // 2. SnapSave (Reels / Multi-Post fallback)
     if (!result || !result.media || result.media.length === 0) {
-      result = await fetchViaRapidApi(url, rapidApiKey);
+      result = await fetchViaSnapSave(cleanUrl);
     }
 
     // 3. Embed Scraper
