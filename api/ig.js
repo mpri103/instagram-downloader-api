@@ -202,6 +202,15 @@ async function fetchProfileData(username, sessionCookie) {
       console.warn("Clips fetch error:", e);
     }
 
+    // Ensure all video posts from timeline feed are also included in reelsList
+    const existingReelCodes = new Set(reelsList.map(r => r.code));
+    for (const p of feedPosts) {
+      if (p.type === "video" && p.code && !existingReelCodes.has(p.code)) {
+        existingReelCodes.add(p.code);
+        reelsList.push(p);
+      }
+    }
+
     // Combined unique media list
     const combinedMedia = [];
     const seenCodes = new Set();
