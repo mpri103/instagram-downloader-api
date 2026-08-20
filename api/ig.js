@@ -29,39 +29,61 @@ function shortcodeToId(shortcode) {
 
 function getShortcode(url) {
   if (!url) return null;
-  const match = url.match(/(?:instagram\.com\/(?:p|reel|reels|tv|share\/p|share\/reel|share)\/([A-Za-z0-9_-]+))/i)
-    || url.match(/(?:instagram\.com\/(?:share)\/([A-Za-z0-9_-]+))/i)
-    || url.match(/\/([A-Za-z0-9_-]{10,12})(?:\/|\?|$)/);
-  return match ? match[1] : null;
-}
+  const trimmed = url.trim();
 
-function getUsernameFromQuery(query) {
-  if (!query) return null;
-  const trimmed = query.trim();
-
-  if (getShortcode(trimmed)) return null;
-
-  const urlMatch = trimmed.match(/(?:instagram\.com\/)([A-Za-z0-9_.]+)/i);
-  if (urlMatch && !['p', 'reel', 'reels', 'tv', 'stories', 'explore', 'direct'].includes(urlMatch[1].toLowerCase())) {
-    return urlMatch[1];
+  // 1. Match explicit post / reel / tv / clip / share URLs
+  const match = trimmed.match(/(?:instagram\.com\/(?:p|reel|reels|tv|clip|share\/p|share\/reel|share)\/([A-Za-z0-9_-]+))/i);
+  if (match && match[1]) {
+    return match[1];
   }
 
-  if (trimmed.startsWith('@')) {
-    return trimmed.substring(1).replace(/[^A-Za-z0-9_.]/g, '');
-  }
-
-  if (!trimmed.includes('/') && !trimmed.includes(' ') && trimmed.length <= 30 && /^[A-Za-z0-9_.]+$/.test(trimmed)) {
-    return trimmed;
+  // 2. Direct raw shortcode input (e.g. C8m8pZqv_6_) but NOT a username or URL
+  if (!trimmed.includes('/') && !trimmed.includes('?') && !trimmed.includes('&') && !trimmed.startsWith('@')) {
+    if (/^[A-Za-z0-9_-]{10,12}$/.test(trimmed) && (trimmed.includes('_') || trimmed.includes('-'))) {
+      return trimmed;
+    }
   }
 
   return null;
 }
 
-function getUserIdFromSession(session) {
-  if (!session) return "";
-  const decoded = decodeURIComponent(session);
-  const parts = decoded.split(":");
-  return parts[0] || "";
+function getUsernameFromQuery(query) {
+  if (!query) return null;
+  let trimmed = query.trim();
+
+  // If it's explicitly a post/reel/carousel URL, it's NOT a profile
+  if (trimmed.match(/instagram\.com\/(?:p|reel|reels|tv|clip|share\/p|share\/reel|share)\//i)) {
+    return null;
+  }
+
+  // 1. Full Instagram Profile URL (e.g. https://www.instagram.com/cristiano/ or https://instagram.com/techburner?igsh=...)
+  const urlMatch = trimmed.match(/(?:https?:\/\/)?(?:www\.)?instagram\.com\/([A-Za-z0-9_.]+)/i);
+  if (urlMatch && urlMatch[1]) {
+    const candidate = urlMatch[1].replace(/[\/?#].*$/, '').trim();
+    const reserved = ['p', 'reel', 'reels', 'tv', 'stories', 'explore', 'direct', 'accounts', 'developer', 'about', 'legal', 'directory'];
+    if (!reserved.includes(candidate.toLowerCase()) && candidate.length > 0 && candidate.length <= 30) {
+      return candidate;
+    }
+  }
+
+  // 2. Username with @ (e.g. @cristiano or @techburner)
+  if (trimmed.startsWith('@')) {
+    const candidate = trimmed.substring(1).replace(/[^A-Za-z0-9_.]/g, '').trim();
+    if (candidate.length > 0 && candidate.length <= 30) {
+      return candidate;
+    }
+  }
+
+  // 3. Plain Username (e.g. cristiano, virat.kohli, techburner)
+  const cleanPlain = trimmed.replace(/[\/?#].*$/, '').replace(/^@/, '').trim();
+  if (!cleanPlain.includes('/') && !cleanPlain.includes(' ') && cleanPlain.length <= 30 && /^[A-Za-z0-9_.]+$/.test(cleanPlain)) {
+    const reserved = ['p', 'reel', 'reels', 'tv', 'stories', 'explore', 'direct', 'accounts'];
+    if (!reserved.includes(cleanPlain.toLowerCase())) {
+      return cleanPlain;
+    }
+  }
+
+  return null;
 }
 
 function mapRawItem(item, defaultType = null) {
@@ -285,68 +307,140 @@ async function fetchUserHighlights(userId, sessionCookie) {
 
 async function fetchProfileData(username, sessionCookie) {
   try {
-    const session = sessionCookie?.trim() || "";
+    const session = cleanSessionCookie(sessionCookie);
     const userId = getUserIdFromSession(session);
+    const cleanUser = username.trim().toLowerCase().replace(/^@/, '').replace(/[\/?#].*$/, '');
 
-    // Step 1: User Lookup via topsearch
-    const searchUrl = `https://www.instagram.com/web/search/topsearch/?query=${encodeURIComponent(username)}`;
-    const searchRes = await fetch(searchUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "X-IG-App-ID": "936619743392459",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": "https://www.instagram.com/",
-        "Cookie": `sessionid=${session}; ds_user_id=${userId};`
-      }
-    });
+    let userObj = null;
+    let initialFeedItems = [];
 
-    if (!searchRes.ok) return null;
-
-    const searchData = await searchRes.json().catch(() => null);
-    if (!searchData || !searchData.users || searchData.users.length === 0) return null;
-
-    let userObj = searchData.users.find(u => u.user.username.toLowerCase() === username.toLowerCase())?.user;
-    if (!userObj) userObj = searchData.users[0].user;
-
-    const rawPic = userObj.profile_pic_url || "";
-    const hdPic = userObj.hd_profile_pic_url_info?.url || rawPic;
-
-    // Step 2: Fetch Initial Batch of Timeline Feed Posts (2 Pages = 24 items)
-    let feedPosts = [];
-    let postsNextMaxId = null;
-    let postsHasMore = false;
-
+    // Method A: Official Instagram Web Profile Info API
     try {
-      let maxId = "";
-      const maxPages = 2;
+      const webProfileUrl = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(cleanUser)}`;
+      const webRes = await fetch(webProfileUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/126.0.0.0",
+          "Accept": "*/*",
+          "X-IG-App-ID": "936619743392459",
+          "X-Requested-With": "XMLHttpRequest",
+          "Referer": `https://www.instagram.com/${encodeURIComponent(cleanUser)}/`,
+          "Cookie": `sessionid=${session}; ds_user_id=${userId};`
+        }
+      });
 
-      for (let page = 0; page < maxPages; page++) {
-        const feedUrl = `https://i.instagram.com/api/v1/feed/user/${userObj.pk}/${maxId ? `?max_id=${maxId}` : ''}`;
-        const feedRes = await fetch(feedUrl, {
+      if (webRes.ok) {
+        const webJson = await webRes.json().catch(() => null);
+        const u = webJson?.data?.user;
+        if (u) {
+          userObj = {
+            pk: u.id,
+            username: u.username,
+            full_name: u.full_name || u.username,
+            is_private: !!u.is_private,
+            is_verified: !!u.is_verified,
+            follower_count: u.edge_followed_by?.count ? String(u.edge_followed_by.count) : "",
+            profile_pic: u.profile_pic_url || "",
+            profile_pic_hd: u.profile_pic_url_hd || u.profile_pic_url || ""
+          };
+
+          if (u.edge_owner_to_timeline_media?.edges) {
+            for (const edge of u.edge_owner_to_timeline_media.edges) {
+              const node = edge.node;
+              if (node) {
+                const isVid = node.is_video;
+                initialFeedItems.push({
+                  id: node.id,
+                  code: node.shortcode,
+                  type: isVid ? "video" : (node.edge_sidecar_to_children ? "carousel" : "image"),
+                  url: node.video_url || node.display_url,
+                  thumbnail: node.display_url,
+                  caption: node.edge_media_to_caption?.edges?.[0]?.node?.text || "",
+                  like_count: node.edge_liked_by?.count || 0,
+                  comment_count: node.edge_media_to_comment?.count || 0,
+                  play_count: node.video_view_count || node.video_play_count || 0,
+                  carousel_media: []
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {}
+
+    // Method B: Fallback to topsearch lookup if userObj was not found
+    if (!userObj) {
+      try {
+        const searchUrl = `https://www.instagram.com/web/search/topsearch/?query=${encodeURIComponent(cleanUser)}`;
+        const searchRes = await fetch(searchUrl, {
           headers: {
-            ...DEFAULT_HEADERS,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "X-IG-App-ID": "936619743392459",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.instagram.com/",
             "Cookie": `sessionid=${session}; ds_user_id=${userId};`
           }
         });
 
-        if (!feedRes.ok) break;
+        if (searchRes.ok) {
+          const searchData = await searchRes.json().catch(() => null);
+          if (searchData && searchData.users && searchData.users.length > 0) {
+            let found = searchData.users.find(u => u.user.username.toLowerCase() === cleanUser.toLowerCase())?.user;
+            if (!found) found = searchData.users[0].user;
 
-        const feedData = await feedRes.json().catch(() => null);
-        if (!feedData || !Array.isArray(feedData.items) || feedData.items.length === 0) break;
+            const rawPic = found.profile_pic_url || "";
+            const hdPic = found.hd_profile_pic_url_info?.url || rawPic;
 
-        for (const item of feedData.items) {
-          feedPosts.push(mapRawItem(item));
+            userObj = {
+              pk: found.pk,
+              username: found.username,
+              full_name: found.full_name || found.username,
+              is_private: !!found.is_private,
+              is_verified: !!found.is_verified,
+              follower_count: found.search_social_context || "",
+              profile_pic: rawPic,
+              profile_pic_hd: hdPic
+            };
+          }
         }
+      } catch (e) {}
+    }
 
-        maxId = feedData.next_max_id;
-        postsNextMaxId = maxId || null;
-        postsHasMore = !!feedData.more_available && !!maxId;
+    if (!userObj) return null;
 
-        if (!maxId || !feedData.more_available) break;
-      }
-    } catch (e) {
-      console.warn("Feed fetch error:", e);
+    // Step 2: Fetch Timeline Feed Posts via Mobile App API
+    let feedPosts = [...initialFeedItems];
+    let postsNextMaxId = null;
+    let postsHasMore = false;
+
+    if (feedPosts.length === 0 && !userObj.is_private) {
+      try {
+        let maxId = "";
+        const maxPages = 2;
+
+        for (let page = 0; page < maxPages; page++) {
+          const feedUrl = `https://i.instagram.com/api/v1/feed/user/${userObj.pk}/${maxId ? `?max_id=${maxId}` : ''}`;
+          const feedRes = await fetch(feedUrl, {
+            headers: {
+              ...DEFAULT_HEADERS,
+              "Cookie": `sessionid=${session}; ds_user_id=${userId};`
+            }
+          });
+
+          if (!feedRes.ok) break;
+          const feedData = await feedRes.json().catch(() => null);
+          if (!feedData || !Array.isArray(feedData.items) || feedData.items.length === 0) break;
+
+          for (const item of feedData.items) {
+            feedPosts.push(mapRawItem(item));
+          }
+
+          maxId = feedData.next_max_id;
+          postsNextMaxId = maxId || null;
+          postsHasMore = !!feedData.more_available && !!maxId;
+          if (!maxId || !feedData.more_available) break;
+        }
+      } catch (e) {}
     }
 
     // Step 3: Fetch Initial Batch of Dedicated Clips (Reels Tab)
@@ -354,40 +448,40 @@ async function fetchProfileData(username, sessionCookie) {
     let reelsNextMaxId = null;
     let reelsHasMore = false;
 
-    try {
-      const clipsUrl = "https://i.instagram.com/api/v1/clips/user/";
-      const form = new URLSearchParams();
-      form.append("target_user_id", userObj.pk);
-      form.append("page_size", "24");
+    if (!userObj.is_private) {
+      try {
+        const clipsUrl = "https://i.instagram.com/api/v1/clips/user/";
+        const form = new URLSearchParams();
+        form.append("target_user_id", userObj.pk);
+        form.append("page_size", "24");
 
-      const clipsRes = await fetch(clipsUrl, {
-        method: "POST",
-        headers: {
-          ...DEFAULT_HEADERS,
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          "Cookie": `sessionid=${session}; ds_user_id=${userId};`
-        },
-        body: form.toString()
-      });
+        const clipsRes = await fetch(clipsUrl, {
+          method: "POST",
+          headers: {
+            ...DEFAULT_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Cookie": `sessionid=${session}; ds_user_id=${userId};`
+          },
+          body: form.toString()
+        });
 
-      if (clipsRes.ok) {
-        const clipsData = await clipsRes.json().catch(() => null);
-        if (clipsData && Array.isArray(clipsData.items)) {
-          for (const item of clipsData.items) {
-            reelsList.push(mapRawItem(item, "video"));
+        if (clipsRes.ok) {
+          const clipsData = await clipsRes.json().catch(() => null);
+          if (clipsData && Array.isArray(clipsData.items)) {
+            for (const item of clipsData.items) {
+              reelsList.push(mapRawItem(item, "video"));
+            }
+            reelsNextMaxId = clipsData.paging_info?.max_id || clipsData.next_max_id || null;
+            reelsHasMore = !!clipsData.paging_info?.more_available;
           }
-          reelsNextMaxId = clipsData.paging_info?.max_id || clipsData.next_max_id || null;
-          reelsHasMore = !!clipsData.paging_info?.more_available;
         }
-      }
-    } catch (e) {
-      console.warn("Clips fetch error:", e);
+      } catch (e) {}
     }
 
     // Step 4: Fetch Active Stories & Highlights (Parallel)
     const [storiesList, highlightsList] = await Promise.all([
-      fetchUserStories(userObj.pk, session).catch(() => []),
-      fetchUserHighlights(userObj.pk, session).catch(() => [])
+      userObj.is_private ? Promise.resolve([]) : fetchUserStories(userObj.pk, session).catch(() => []),
+      userObj.is_private ? Promise.resolve([]) : fetchUserHighlights(userObj.pk, session).catch(() => [])
     ]);
 
     // Ensure all video posts from timeline feed are also included in reelsList
@@ -413,16 +507,7 @@ async function fetchProfileData(username, sessionCookie) {
     return {
       status: true,
       type: "profile",
-      user: {
-        pk: userObj.pk,
-        username: userObj.username,
-        full_name: userObj.full_name || userObj.username,
-        is_private: !!userObj.is_private,
-        is_verified: !!userObj.is_verified,
-        follower_count: userObj.search_social_context || "",
-        profile_pic: rawPic,
-        profile_pic_hd: hdPic
-      },
+      user: userObj,
       posts_count: feedPosts.length,
       reels_count: reelsList.length,
       stories_count: storiesList.length,
