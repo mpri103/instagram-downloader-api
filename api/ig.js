@@ -776,7 +776,41 @@ async function fetchViaOEmbed(shortcode) {
   }
 }
 
-module.exports = async function handler(req, res) {
+function logToDatabase(logData) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY;
+
+  if (!supabaseUrl || !supabaseKey) return;
+
+  try {
+    const payload = {
+      event_type: logData.event_type || "success",
+      url_or_query: (logData.url_or_query || "").substring(0, 500),
+      media_type: logData.media_type || "media",
+      status_code: logData.status_code || 200,
+      error_message: logData.error_message || "",
+      session_used: logData.session_used ? (logData.session_used.substring(0, 15) + "...") : "",
+      ip_address: logData.ip_address || "",
+      latency_ms: logData.latency_ms || 0,
+      created_at: new Date().toISOString()
+    };
+
+    fetch(`${supabaseUrl}/rest/v1/instagram_logs`, {
+      method: "POST",
+      headers: {
+        "apikey": supabaseKey,
+        "Authorization": `Bearer ${supabaseKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    }).catch(() => {});
+  } catch (e) {}
+}
+
+module.exports = async (req, res) => {
+  const startTime = Date.now();
+  const clientIp = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "";
+
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -835,8 +869,28 @@ module.exports = async function handler(req, res) {
 
       const paginatedResult = await fetchPaginatedFeed(targetUserId, feedType, maxId, sessionCookie);
       if (paginatedResult) {
+        logToDatabase({
+          event_type: "success",
+          media_type: "paginate",
+          url_or_query: `User ID: ${targetUserId} (${feedType})`,
+          status_code: 200,
+          session_used: sessionCookie,
+          ip_address: clientIp,
+          latency_ms: Date.now() - startTime
+        });
         return res.status(200).json(paginatedResult);
       }
+
+      logToDatabase({
+        event_type: "error",
+        media_type: "paginate",
+        url_or_query: `User ID: ${targetUserId} (${feedType})`,
+        status_code: 404,
+        error_message: "No more items available or rate limited.",
+        session_used: sessionCookie,
+        ip_address: clientIp,
+        latency_ms: Date.now() - startTime
+      });
       return res.status(404).json({ status: false, message: "No more items available or rate limited." });
     }
 
@@ -848,12 +902,30 @@ module.exports = async function handler(req, res) {
       }
 
       const stories = await fetchUserStories(targetUserId, sessionCookie);
+      logToDatabase({
+        event_type: "success",
+        media_type: "stories",
+        url_or_query: `User ID: ${targetUserId}`,
+        status_code: 200,
+        session_used: sessionCookie,
+        ip_address: clientIp,
+        latency_ms: Date.now() - startTime
+      });
       return res.status(200).json({ status: true, type: "stories", user_id: targetUserId, items: stories });
     }
 
     const targetQuery = req.query.url || (req.body && req.body.url);
 
     if (!targetQuery) {
+      logToDatabase({
+        event_type: "error",
+        media_type: "unknown",
+        url_or_query: "Empty Query",
+        status_code: 400,
+        error_message: "Missing Instagram URL or Username parameter",
+        ip_address: clientIp,
+        latency_ms: Date.now() - startTime
+      });
       return res.status(400).json({
         status: false,
         message: "Missing Instagram URL or Username parameter (?url=...)"
@@ -866,6 +938,15 @@ module.exports = async function handler(req, res) {
       for (const currentSession of [sessionCookie, ...sessionPool.filter(s => s !== sessionCookie)]) {
         const profileResult = await fetchProfileData(username, currentSession);
         if (profileResult && profileResult.user) {
+          logToDatabase({
+            event_type: "success",
+            media_type: "profile",
+            url_or_query: targetQuery,
+            status_code: 200,
+            session_used: currentSession,
+            ip_address: clientIp,
+            latency_ms: Date.now() - startTime
+          });
           return res.status(200).json(profileResult);
         }
       }
@@ -874,6 +955,16 @@ module.exports = async function handler(req, res) {
     // 2. MEDIA HANDLER (With Multi-Session Failover)
     const shortcode = getShortcode(targetQuery);
     if (!shortcode) {
+      logToDatabase({
+        event_type: "error",
+        media_type: "invalid_url",
+        url_or_query: targetQuery,
+        status_code: 400,
+        error_message: "Invalid Instagram link or username format",
+        session_used: sessionCookie,
+        ip_address: clientIp,
+        latency_ms: Date.now() - startTime
+      });
       return res.status(400).json({
         status: false,
         message: "Invalid Instagram link or username. Please check and try again."
@@ -911,6 +1002,16 @@ module.exports = async function handler(req, res) {
         }
       }
 
+      logToDatabase({
+        event_type: "success",
+        media_type: uniqueMedia[0]?.type || "media",
+        url_or_query: targetQuery,
+        status_code: 200,
+        session_used: sessionCookie,
+        ip_address: clientIp,
+        latency_ms: Date.now() - startTime
+      });
+
       return res.status(200).json({
         status: true,
         type: "media",
@@ -922,6 +1023,17 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    logToDatabase({
+      event_type: "error",
+      media_type: "media",
+      url_or_query: targetQuery,
+      status_code: 404,
+      error_message: "Could not fetch media. Post might be private or session expired.",
+      session_used: sessionCookie,
+      ip_address: clientIp,
+      latency_ms: Date.now() - startTime
+    });
+
     return res.status(404).json({
       status: false,
       message: "Could not fetch media. Post might be private or deleted."
@@ -929,6 +1041,15 @@ module.exports = async function handler(req, res) {
 
   } catch (error) {
     console.error("Vercel IG Handler Error:", error);
+    logToDatabase({
+      event_type: "error",
+      media_type: "system_error",
+      url_or_query: "Internal Error",
+      status_code: 500,
+      error_message: error.message || "Internal server error",
+      ip_address: clientIp,
+      latency_ms: Date.now() - startTime
+    });
     return res.status(500).json({
       status: false,
       message: "Internal server error while processing request."
