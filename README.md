@@ -132,7 +132,10 @@ Application Tab > Cookies > https://www.instagram.com
 1. Push this `vercel-api` directory to your GitHub repository.
 2. Log into [Vercel Dashboard](https://vercel.com/) > **Add New...** > **Project** > **Import Git Repository**.
 3. In **Environment Variables**, add:
-   * `IG_SESSION_POOL` = `cookie1,cookie2,cookie3`
+   * `SUPABASE_URL` = `https://xyzproject.supabase.co` *(Recommended - fetches latest active session from Admin Dashboard automatically)*
+   * `SUPABASE_ANON_KEY` = `eyJhbGciOiJIUzI1Ni...`
+   * `IG_SESSION_POOL` = `cookie1,cookie2,cookie3` *(Optional static backup pool)*
+   * `IG_SESSION_ID` = `single_session_cookie` *(Optional static fallback)*
 4. Click **Deploy**.
 
 ---

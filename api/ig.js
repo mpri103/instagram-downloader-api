@@ -109,30 +109,110 @@ function mapRawItem(item, defaultType = null) {
 }
 
 let sessionRotationIndex = 0;
+let cachedSupabaseSession = null;
+let cachedSupabasePool = [];
+let lastSupabaseFetchTime = 0;
+const SUPABASE_CACHE_TTL = 60 * 1000; // 60 seconds
 
 function parseSessionPool(rawPool) {
   if (!rawPool) return [];
   return rawPool.split(/[\n,;]+/).map(s => s.trim()).filter(s => s.length > 5);
 }
 
-function getSessionPool() {
-  const poolRaw = process.env.IG_SESSION_POOL || process.env.IG_SESSION_IDS || "";
-  let sessions = parseSessionPool(poolRaw);
+/**
+ * Dynamically fetch latest active session ID & cookie pool from Supabase database
+ */
+async function fetchSupabaseConfigurations() {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  const singleSession = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g";
+  if (!supabaseUrl || !supabaseKey) return null;
 
-  if (singleSession && !sessions.includes(singleSession)) {
-    sessions.push(singleSession);
+  const now = Date.now();
+  if (cachedSupabaseSession && (now - lastSupabaseFetchTime) < SUPABASE_CACHE_TTL) {
+    return { session: cachedSupabaseSession, pool: cachedSupabasePool };
   }
 
-  return sessions.length > 0 ? sessions : ["43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g"];
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/instagram_DL?select=key,value,status`, {
+      headers: {
+        "apikey": supabaseKey,
+        "Authorization": `Bearer ${supabaseKey}`
+      }
+    });
+
+    if (res.ok) {
+      const rows = await res.json();
+      for (const row of rows) {
+        if (row.key === "active_session_id" && row.value && row.status !== "expired") {
+          cachedSupabaseSession = row.value.trim();
+        } else if (row.key === "cookie_pool" && row.value) {
+          try {
+            const parsed = JSON.parse(row.value);
+            cachedSupabasePool = Array.isArray(parsed) ? parsed.map(item => (typeof item === 'string' ? item : item.session_id)).filter(Boolean) : [];
+          } catch (e) {
+            cachedSupabasePool = [];
+          }
+        }
+      }
+      lastSupabaseFetchTime = now;
+      return { session: cachedSupabaseSession, pool: cachedSupabasePool };
+    }
+  } catch (err) {
+    console.error("Supabase dynamic session fetch error:", err.message);
+  }
+
+  return { session: cachedSupabaseSession, pool: cachedSupabasePool };
+}
+
+function getSessionPool(dynamicSession = null, dynamicPool = []) {
+  let dbSessions = [];
+
+  // 1. Highest Priority: Database Dynamic Pool & Active Session
+  if (Array.isArray(dynamicPool) && dynamicPool.length > 0) {
+    dynamicPool.forEach(s => {
+      if (s && typeof s === "string" && s.trim().length > 5 && !dbSessions.includes(s.trim())) {
+        dbSessions.push(s.trim());
+      }
+    });
+  }
+  if (dynamicSession && typeof dynamicSession === "string" && dynamicSession.trim().length > 5) {
+    if (!dbSessions.includes(dynamicSession.trim())) {
+      dbSessions.unshift(dynamicSession.trim());
+    }
+  }
+
+  // Priority 1: If database has sessions, USE ONLY DATABASE SESSIONS!
+  if (dbSessions.length > 0) {
+    return dbSessions;
+  }
+
+  // 2. Priority 2: Fallback to Server Environment Variables
+  let envSessions = [];
+  const poolRaw = process.env.IG_SESSION_POOL || process.env.IG_SESSION_IDS || "";
+  if (poolRaw) {
+    envSessions = parseSessionPool(poolRaw);
+  }
+
+  const singleSession = process.env.IG_COOKIE || process.env.IG_SESSION_ID || "";
+  if (singleSession && singleSession.trim().length > 5 && !envSessions.includes(singleSession.trim())) {
+    envSessions.push(singleSession.trim());
+  }
+
+  if (envSessions.length > 0) {
+    return envSessions;
+  }
+
+  // 3. Last Emergency Fallback
+  return ["43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g"];
 }
 
 function getNextRotatedSession(sessions) {
   if (!sessions || sessions.length === 0) return "";
   if (sessions.length === 1) return sessions[0];
-  sessionRotationIndex = (sessionRotationIndex + 1) % sessions.length;
-  return sessions[sessionRotationIndex];
+  // Randomly pick a session across available pool for distributed load balancing
+  const randomIndex = Math.floor(Math.random() * sessions.length);
+  return sessions[randomIndex];
 }
 
 async function fetchUserStories(userId, sessionCookie) {
@@ -600,7 +680,8 @@ module.exports = async function handler(req, res) {
 
   try {
     const action = req.query.action || (req.body && req.body.action);
-    const sessionPool = getSessionPool();
+    const dynamicConfig = await fetchSupabaseConfigurations();
+    const sessionPool = getSessionPool(dynamicConfig?.session, dynamicConfig?.pool);
     const sessionCookie = getNextRotatedSession(sessionPool);
 
     // 0. IMAGE & MEDIA PROXY HANDLER (Fixes Hotlinking / CDN CORS)
