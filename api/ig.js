@@ -207,12 +207,34 @@ function getSessionPool(dynamicSession = null, dynamicPool = []) {
   return ["43415903614%3AN1rQi6cXXQU3p8%3A7%3AAYgwoxoODBF2C1etY4mwfT8QALinHj1Y8y36XhSJ8g"];
 }
 
+function cleanSessionCookie(rawSession) {
+  if (!rawSession || typeof rawSession !== "string") return "";
+  let s = rawSession.trim();
+  s = s.replace(/^["']|["']$/g, '');
+  s = s.replace(/^sessionid=/i, '').trim();
+  return s;
+}
+
+function getUserIdFromSession(sessionCookie) {
+  if (!sessionCookie) return "0";
+  const clean = cleanSessionCookie(sessionCookie);
+  const parts = clean.split("%3A");
+  if (parts.length > 0 && /^\d+$/.test(parts[0])) {
+    return parts[0];
+  }
+  const altParts = clean.split(":");
+  if (altParts.length > 0 && /^\d+$/.test(altParts[0])) {
+    return altParts[0];
+  }
+  return "0";
+}
+
 function getNextRotatedSession(sessions) {
   if (!sessions || sessions.length === 0) return "";
-  if (sessions.length === 1) return sessions[0];
+  if (sessions.length === 1) return cleanSessionCookie(sessions[0]);
   // Randomly pick a session across available pool for distributed load balancing
   const randomIndex = Math.floor(Math.random() * sessions.length);
-  return sessions[randomIndex];
+  return cleanSessionCookie(sessions[randomIndex]);
 }
 
 async function fetchUserStories(userId, sessionCookie) {
